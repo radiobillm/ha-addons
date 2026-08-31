@@ -1,0 +1,73 @@
+name: "Flow Meters"
+version: "0.2.1"
+slug: "flow_meters"
+description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
+url: "https://github.com/yo1dog/rpi-flow-meters"
+# Pre-built on the Mac (via colima) and pushed to ghcr.io, rather than
+# built on-device: the Pi 3 B+'s 1GB RAM struggled with local builds, AND
+# separately there was a real Dockerfile bug (rpi-lgpio needs swig +
+# libgpio built from source, neither in the original Dockerfile) — fixed
+# there too, so an on-device build would likely work now, but this way
+# every future update is an instant pull instead of a build.
+image: "ghcr.io/radiobillm/flow-meters-addon"
+arch:
+  - aarch64
+init: false
+gpio: true
+startup: services
+boot: auto
+options:
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  debounce_ms: 20
+  publish_interval_s: 5
+  # Adafruit i2c 16x2 RGB LCD Pi Plate: 2 sensors per page (one per row),
+  # UP/DOWN buttons page manually (same as the old code); after
+  # AUTO_FOLLOW_IDLE_S (10s, in lcd_ui.py) idle it auto-jumps to whichever
+  # page has a sensor currently flowing. Needs I2C wired (SDA=GPIO2/pin3,
+  # SCL=GPIO3/pin5 — untouched by the flow sensor pins).
+  # DEFAULTED OFF: the LCD/Blinka Python deps are left out of the Docker
+  # image for now (too heavy for a 1GB Pi 3 B+ to build reliably
+  # alongside everything else) and the plate isn't wired yet anyway. To
+  # re-enable: add the adafruit-blinka/circuitpython packages + the
+  # /dev/i2c-1 device mapping back into Dockerfile/config.yaml, then flip
+  # this true.
+  enable_lcd: false
+  lcd_color: "red"
+  lcd_refresh_s: 0.5
+  button_poll_s: 0.05
+  # ml_per_pulse default of 9.26 = 1000mL / 108 pulses/liter, per the
+  # YF-DN32-S-SM (stainless) datasheet. UNVERIFIED for your actual unit —
+  # confirm with a timed-fill test against the raw Pulse Count entity
+  # before trusting Flow Rate / Total Volume. A plastic-body DN32 variant
+  # has been seen published at ~27 pulses/liter (37 mL/pulse) instead.
+  sensors:
+    - name: "City"
+      gpio: 5
+      ml_per_pulse: 9.26
+    - name: "Cistern"
+      gpio: 6
+      ml_per_pulse: 9.26
+    - name: "House"
+      gpio: 13
+      ml_per_pulse: 9.26
+    - name: "Fill-Cistern"
+      gpio: 19
+      ml_per_pulse: 9.26
+schema:
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str
+  mqtt_password: password
+  debounce_ms: int(1,200)
+  publish_interval_s: int(1,60)
+  enable_lcd: bool
+  lcd_color: "list(red|green|blue|yellow|cyan|magenta|white|off)"
+  lcd_refresh_s: float
+  button_poll_s: float
+  sensors:
+    - name: str
+      gpio: int(2,27)
+      ml_per_pulse: float
