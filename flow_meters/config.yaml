@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.3"
+version: "0.2.4"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -14,6 +14,8 @@ arch:
   - aarch64
 init: false
 gpio: true
+devices:
+  - "/dev/i2c-1:/dev/i2c-1:rwm"
 startup: services
 boot: auto
 options:
@@ -28,13 +30,11 @@ options:
   # AUTO_FOLLOW_IDLE_S (10s, in lcd_ui.py) idle it auto-jumps to whichever
   # page has a sensor currently flowing. Needs I2C wired (SDA=GPIO2/pin3,
   # SCL=GPIO3/pin5 — untouched by the flow sensor pins).
-  # DEFAULTED OFF: the LCD/Blinka Python deps are left out of the Docker
-  # image for now (too heavy for a 1GB Pi 3 B+ to build reliably
-  # alongside everything else) and the plate isn't wired yet anyway. To
-  # re-enable: add the adafruit-blinka/circuitpython packages + the
-  # /dev/i2c-1 device mapping back into Dockerfile/config.yaml, then flip
-  # this true.
-  enable_lcd: false
+  # Blinka/adafruit_character_lcd deps + /dev/i2c-1 device mapping added
+  # back 2026-08-31 now that the plate is seated and the core system is
+  # proven. The plate gets I2C/power/buttons automatically by being seated
+  # on the 40-pin header — no separate wiring needed for the display itself.
+  enable_lcd: true
   lcd_color: "red"
   lcd_refresh_s: 0.5
   button_poll_s: 0.05
