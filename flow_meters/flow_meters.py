@@ -32,7 +32,7 @@ DISCOVERY_PREFIX = "homeassistant"
 BASE_TOPIC = "flow_meters"
 DEVICE = {
     "identifiers": ["flow_meters_addon"],
-    "name": "Flow Meters",
+    "name": "Water Flow",
     "manufacturer": "DIY",
     "model": "RPi GPIO Flow Meters",
 }
