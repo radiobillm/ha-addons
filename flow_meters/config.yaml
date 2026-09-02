@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.9"
+version: "0.2.10"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -18,6 +18,11 @@ devices:
   - "/dev/i2c-1:/dev/i2c-1:rwm"
 startup: services
 boot: auto
+# Auto-restart if the process dies (e.g. OOM-killed — a real, recurring
+# issue on this Pi 3 B+'s tight 903MB RAM, see hq-water-rpi-mqtt-pivot
+# memory). Was set at runtime via an options POST on 2026-09-02; persisted
+# here so it survives future uninstall/reinstall deploy cycles too.
+watchdog: true
 options:
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883

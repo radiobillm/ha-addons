@@ -82,7 +82,18 @@ def _format_row(label, rate_lpm, num_cols):
         rate_str = "---"
     else:
         gpm = rate_lpm * GALLON_PER_LITER
-        rate_str = f"{int(gpm)}gm"  # floored, matches old format_flow_rate()
+        # One decimal place below 10 gpm (2026-09-02 fix): the original
+        # floor-to-whole-gpm format showed "0gm" for any real flow under
+        # 1 gpm — which is most of the realistic range here, especially
+        # during bench-test taps and the placeholder ml_per_pulse=9.26
+        # calibration, so it looked like nothing was registering at all.
+        # Falls back to a floored integer at 10+ gpm to stay inside the
+        # width budget (worst case 5 display columns after the longest
+        # label, e.g. "Fr Cistern:" — "0.3gm" fits, "12.3gm" wouldn't).
+        if gpm < 10:
+            rate_str = f"{gpm:.1f}gm"
+        else:
+            rate_str = f"{int(gpm)}gm"
     return (prefix + rate_str.rjust(max(0, num_cols - len(prefix))))[:num_cols]
 
 
