@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.7"
+version: "0.2.8"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -47,25 +47,27 @@ options:
   # confirm with a timed-fill test against the raw Pulse Count entity
   # before trusting Flow Rate / Total Volume. A plastic-body DN32 variant
   # has been seen published at ~27 pulses/liter (37 mL/pulse) instead.
-  # GPIO pins revised 2026-09-02 (was 5/6/13/19) for a contiguous physical
-  # run on pins 31/33/35/37/39 (signal/signal/signal/signal/GND, one
-  # straight row) — the case's height limits the header to a flat
-  # under-hat solder tap rather than a stacking connector, so a clean
-  # contiguous block outside the hat's footprint (pins 27+) mattered more
-  # than which specific GPIO numbers were used. See hq-water-rpi-mqtt-pivot
+  # GPIO pins revised 2026-09-02 for a contiguous physical run on pins
+  # 31/33/35/37/39 (signal/signal/signal/signal/GND, one straight row) —
+  # the case's height limits the header to a flat under-hat solder tap
+  # rather than a stacking connector, so a clean contiguous block outside
+  # the hat's footprint (pins 27+) mattered more than which specific GPIO
+  # numbers were used. Sensor-to-pin assignment below matches Bill's ACTUAL
+  # physical wiring (confirmed against his own pin labels, not a guessed
+  # City/Cistern/House/Fill-Cistern order) — see hq-water-rpi-mqtt-pivot
   # memory for the full pin plan including the new ADS1115/AquaPlumb
   # water-level sensor (separate from this add-on for now).
   sensors:
-    - name: "City"
+    - name: "House"
       gpio: 6
       ml_per_pulse: 9.26
-    - name: "Cistern"
+    - name: "Fill-Cistern"
       gpio: 13
       ml_per_pulse: 9.26
-    - name: "House"
+    - name: "City"
       gpio: 19
       ml_per_pulse: 9.26
-    - name: "Fill-Cistern"
+    - name: "Cistern"
       gpio: 26
       ml_per_pulse: 9.26
 schema:
