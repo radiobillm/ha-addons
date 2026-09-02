@@ -1,22 +1,28 @@
 """
 Adafruit i2c 16x2 RGB LCD Pi Plate driver + page UI.
 
-Matches the old rpi-flow-meters (ui/cistern_ui.py, ui/flow_meters_page.py,
-ui/input_manager.py) behavior exactly:
-- UP/DOWN buttons move between pages (verified against that code — SELECT/
-  LEFT/RIGHT are not bound to anything, same as before).
-- Each page shows up to 2 sensors, one per LCD row, as "<Label>:" left-
-  aligned with the flow rate right-aligned to fill the 16 columns, e.g.
-  "City:          3gm" (whole gallons/min, floored — same
-  format_flow_rate()/create_flow_meter_row_str() logic as the old code).
-  With 4 sensors that's 2 pages of 2.
+Display logic (rewritten 2026-09-02, replacing the old fixed-page scheme):
+- 0 sensors flowing: shows "No flow" centered on row 1, row 2 blank.
+- 1 sensor flowing: that sensor on row 1, row 2 blank.
+- 2 sensors flowing: one per row, both shown at once (whichever two are
+  actually active, not tied to a fixed City/Cistern-style pairing).
+- 3 or 4 sensors flowing: not enough rows for all of them at once, so the
+  display scrolls through them two at a time, advancing to the next pair
+  every SCROLL_INTERVAL_S (2s). Non-overlapping windows in sensor order,
+  wrapping around; with an odd count (3) one sensor repeats each cycle.
+Row format unchanged from the original port of the old rpi-flow-meters
+code: "<Label>:" left-aligned, flow rate right-aligned to fill 16 columns,
+e.g. "Fr City:       3gm" (whole gallons/min, floored). The label shown is
+a DISPLAY-ONLY mapping (see _DISPLAY_LABELS below) to the same Fr:/To:
+directional names used on the HA dashboard card — the underlying sensor
+name (config.yaml, MQTT topics, HA entity ids) is untouched.
 
-On top of that faithful port, this adds auto-follow: after
-AUTO_FOLLOW_IDLE_S seconds with no button press, the display
-automatically jumps to whichever page has a sensor currently flowing
-(typically only one does at a time), so you don't have to page-hunt to
-see what's running. Any button press immediately takes back manual
-control and pauses auto-follow for another AUTO_FOLLOW_IDLE_S seconds.
+UP/DOWN buttons still manually page through the two old fixed pairs
+(City/Cistern, House/Fill-Cistern) for a manual/diagnostic look at a
+specific sensor regardless of flow state — same as before, pauses the
+automatic flow-driven display above for AUTO_FOLLOW_IDLE_S seconds after
+a press, then reverts to it. SELECT/LEFT/RIGHT remain unbound, same as
+the old code.
 
 Uses adafruit_character_lcd.character_lcd_rgb_i2c.Character_LCD_RGB_I2C —
 the SAME class the old code used (see its cistern.py) — which already
@@ -33,8 +39,29 @@ import board
 import busio
 
 GALLON_PER_LITER = 0.264172
-AUTO_FOLLOW_IDLE_S = 10  # seconds of no button press before auto-follow kicks in
+AUTO_FOLLOW_IDLE_S = 10  # seconds of no button press before auto display resumes
+SCROLL_INTERVAL_S = 2.0  # how often the display advances when 3+ sensors are flowing
 FLOW_EPSILON_LPM = 0.05  # below this, a sensor counts as "not flowing"
+
+# Display-only labels (2026-09-02), matching the HA dashboard card's
+# directional Fr:/To: naming (per Bill's own pin labels — see the pin/GPIO
+# table in the hq-water-rpi-mqtt-pivot memory). DISPLAY TEXT ONLY: keys are
+# the config.yaml sensor `name` values, which stay unchanged everywhere
+# else (MQTT topic slugs, HA entity unique_ids) — renaming those would
+# orphan the existing entities rather than relabel them (see the earlier
+# "entity_id stays sticky" device-rename lesson in project memory). Falls
+# back to the raw name for any sensor not in this map.
+_DISPLAY_LABELS = {
+    "House": "To House",
+    "Fill-Cistern": "To Cistern",
+    "City": "Fr City",
+    "Cistern": "Fr Cistern",
+}
+
+
+def _display_label(name):
+    return _DISPLAY_LABELS.get(name, name)
+
 
 _COLORS = {
     "off": [0, 0, 0],
@@ -62,6 +89,7 @@ def _format_row(label, rate_lpm, num_cols):
 class LcdUi(threading.Thread):
     def __init__(self, sensor_names, get_reading, color="red", refresh_s=0.5, poll_s=0.05):
         super().__init__(daemon=True)
+        self._sensor_names = list(sensor_names)
         self._get_reading = get_reading  # callable(name) -> rate_lpm (float) or None
         self._color = _COLORS.get(color, _COLORS["red"])
         self._refresh_s = refresh_s
@@ -73,15 +101,15 @@ class LcdUi(threading.Thread):
         self._num_cols = 16
         self._num_rows = 2
 
-        # group sensors into pages of `num_rows` each, same grouping as
-        # the old CisternUI.create_pages()
+        # fixed pairs for manual button paging only (unrelated to the
+        # automatic flow-driven display) — same grouping as the old
+        # CisternUI.create_pages()
         self._pages = [
-            sensor_names[i:i + self._num_rows]
-            for i in range(0, len(sensor_names), self._num_rows)
+            self._sensor_names[i:i + self._num_rows]
+            for i in range(0, len(self._sensor_names), self._num_rows)
         ]
         self._page_num = 0
-        self._auto_rotate_idx = 0
-        self._last_manual_s = -AUTO_FOLLOW_IDLE_S  # auto-follow active from the start
+        self._last_manual_s = -AUTO_FOLLOW_IDLE_S  # auto display active from the start
 
         self._lcd.color = self._color
         self._lcd.display = True
@@ -98,41 +126,60 @@ class LcdUi(threading.Thread):
         if len(self._pages) > 1:
             self._page_num = (self._page_num - 1) % len(self._pages)
 
-    def _pages_with_flow(self):
-        result = []
-        for i, page in enumerate(self._pages):
-            for name in page:
-                rate = self._get_reading(name)
-                if rate is not None and rate >= FLOW_EPSILON_LPM:
-                    result.append(i)
-                    break
-        return result
+    def _active_sensors(self):
+        """Sensor names currently flowing, in configured order."""
+        active = []
+        for name in self._sensor_names:
+            rate = self._get_reading(name)
+            if rate is not None and rate >= FLOW_EPSILON_LPM:
+                active.append(name)
+        return active
 
-    def _maybe_auto_follow(self, now):
-        if now - self._last_manual_s < AUTO_FOLLOW_IDLE_S:
-            return
-        flowing = self._pages_with_flow()
-        if not flowing:
-            return
-        if self._page_num not in flowing:
-            self._auto_rotate_idx = 0
-            self._page_num = flowing[0]
-        elif len(flowing) > 1:
-            # more than one page has flow at once (unusual) - rotate among them
-            self._auto_rotate_idx = (self._auto_rotate_idx + 1) % len(flowing)
-            self._page_num = flowing[self._auto_rotate_idx]
+    def _auto_rows(self, now):
+        active = self._active_sensors()
+        n = len(active)
 
-    def _draw(self):
+        if n == 0:
+            return ["No flow".center(self._num_cols), " " * self._num_cols]
+
+        if n == 1:
+            return [_format_row(_display_label(active[0]), self._get_reading(active[0]), self._num_cols),
+                    " " * self._num_cols]
+
+        if n == 2:
+            shown = active
+        else:
+            # 3 or 4 active: scroll through non-overlapping pairs, wrapping.
+            num_windows = (n + 1) // 2
+            window_idx = int(now // SCROLL_INTERVAL_S) % num_windows
+            start = window_idx * 2
+            shown = [active[start % n], active[(start + 1) % n]]
+
+        return [_format_row(_display_label(shown[0]), self._get_reading(shown[0]), self._num_cols),
+                _format_row(_display_label(shown[1]), self._get_reading(shown[1]), self._num_cols)]
+
+    def _manual_rows(self):
         page = self._pages[self._page_num]
-        rows = [_format_row(name, self._get_reading(name), self._num_cols) for name in page]
+        rows = [_format_row(_display_label(name), self._get_reading(name), self._num_cols) for name in page]
         while len(rows) < self._num_rows:
             rows.append(" " * self._num_cols)
-        self._lcd.clear()
+        return rows
+
+    def _draw(self, now):
+        if now - self._last_manual_s < AUTO_FOLLOW_IDLE_S:
+            rows = self._manual_rows()
+        else:
+            rows = self._auto_rows(now)
+        # No .clear() here (unlike the original port): every row above is
+        # always padded to exactly _num_cols, so .message fully overwrites
+        # the previous content on its own — clearing first just produced a
+        # visible blank-then-redraw flicker on every refresh for no benefit.
         self._lcd.message = "\n".join(rows)
 
     def run(self):
-        self._draw()
-        last_redraw = time.monotonic()
+        now = time.monotonic()
+        self._draw(now)
+        last_redraw = now
         was_up = was_down = False
         while not self._stop_event.is_set():
             now = time.monotonic()
@@ -142,18 +189,17 @@ class LcdUi(threading.Thread):
             if up and not was_up:
                 self._go_prev()
                 self._last_manual_s = now
-                self._draw()
+                self._draw(now)
                 last_redraw = now
             elif down and not was_down:
                 self._go_next()
                 self._last_manual_s = now
-                self._draw()
+                self._draw(now)
                 last_redraw = now
             was_up, was_down = up, down
 
             if now - last_redraw >= self._refresh_s:
-                self._maybe_auto_follow(now)
-                self._draw()
+                self._draw(now)
                 last_redraw = now
 
             time.sleep(self._poll_s)

@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.8"
+version: "0.2.9"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
