@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.5"
+version: "0.2.6"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -25,11 +25,15 @@ options:
   mqtt_password: ""
   debounce_ms: 20
   publish_interval_s: 5
-  # Adafruit i2c 16x2 RGB LCD Pi Plate: 2 sensors per page (one per row),
-  # UP/DOWN buttons page manually (same as the old code); after
-  # AUTO_FOLLOW_IDLE_S (10s, in lcd_ui.py) idle it auto-jumps to whichever
-  # page has a sensor currently flowing. Needs I2C wired (SDA=GPIO2/pin3,
-  # SCL=GPIO3/pin5 — untouched by the flow sensor pins).
+  # Adafruit i2c 16x2 RGB LCD Pi Plate. Display is flow-driven (see
+  # lcd_ui.py): "No flow" when all sensors are quiet; the 1-2 currently
+  # flowing sensors shown directly, one per row; with 3-4 flowing it
+  # scrolls two at a time every SCROLL_INTERVAL_S (2s). UP/DOWN buttons
+  # still manually page through the two old fixed pairs (City/Cistern,
+  # House/Fill-Cistern) for a diagnostic look regardless of flow state,
+  # pausing the auto display for AUTO_FOLLOW_IDLE_S (10s) after a press.
+  # Needs I2C wired (SDA=GPIO2/pin3, SCL=GPIO3/pin5 — untouched by the
+  # flow sensor pins).
   # Blinka/adafruit_character_lcd deps + /dev/i2c-1 device mapping added
   # back 2026-08-31 now that the plate is seated and the core system is
   # proven. The plate gets I2C/power/buttons automatically by being seated
