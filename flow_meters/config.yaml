@@ -1,7 +1,7 @@
 name: "Flow Meters"
-version: "0.2.11"
+version: "0.2.12"
 slug: "flow_meters"
-description: "GPIO pulse-counting water flow meters (City, Cistern, House, Fill-Cistern) published to MQTT"
+description: "GPIO pulse-counting water flow meters (Cistern, City, House, Yard) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
 # Pre-built on the Mac (via colima) and pushed to ghcr.io, rather than
 # built on-device: the Pi 3 B+'s 1GB RAM struggled with local builds, AND
@@ -25,7 +25,7 @@ boot: auto
 # returned store_app_not_found — survived both a fresh repo clone and a
 # Supervisor restart, so it wasn't a caching issue). Reverted pending
 # investigation into the exact valid schema/placement. Set watchdog via
-# a runtime options POST instead (see hq-water-rpi-mqtt-pivot memory) —
+# a runtime options POST instead (see brett-water-rpi-mqtt-pivot memory) —
 # confirmed to work, just doesn't survive an uninstall/reinstall cycle.
 options:
   mqtt_host: "core-mosquitto"
@@ -63,21 +63,35 @@ options:
   # the hat's footprint (pins 27+) mattered more than which specific GPIO
   # numbers were used. Sensor-to-pin assignment below matches Bill's ACTUAL
   # physical wiring (confirmed against his own pin labels, not a guessed
-  # City/Cistern/House/Fill-Cistern order) — see hq-water-rpi-mqtt-pivot
+  # City/Cistern/House/Fill-Cistern order) — see brett-water-rpi-mqtt-pivot
   # memory for the full pin plan including the new ADS1115/AquaPlumb
   # water-level sensor (separate from this add-on for now).
+  # 2026-09-19: "Fill-Cistern" (GPIO13) renamed to "Yard" - that line no
+  # longer fills the cistern, it feeds the yard now (a real plumbing
+  # change, not a relabel). List order also changed to match the new
+  # dashboard row order (Cistern, City, House, Yard = Fr Cistern, Fr
+  # City, To House, To Yard) - GPIO/ml_per_pulse per sensor unchanged,
+  # only name + position moved. Renaming the raw `name` here (not just
+  # a display-label override) was deliberate despite the entity_id/
+  # unique_id churn this causes (orphans the old flow_meters_fill_
+  # cistern_* entities) - Bill explicitly asked to "zero counters" too,
+  # so a clean break was wanted, not a relabel-in-place. See that day's
+  # entry in brett-water-rpi-mqtt-pivot memory for the full sequence
+  # (also required an add-on uninstall+reinstall to actually zero the
+  # other 3 sensors' totals.json, since options-only changes don't
+  # touch persisted state).
   sensors:
-    - name: "House"
-      gpio: 6
-      ml_per_pulse: 9.26
-    - name: "Fill-Cistern"
-      gpio: 13
+    - name: "Cistern"
+      gpio: 26
       ml_per_pulse: 9.26
     - name: "City"
       gpio: 19
       ml_per_pulse: 9.26
-    - name: "Cistern"
-      gpio: 26
+    - name: "House"
+      gpio: 6
+      ml_per_pulse: 9.26
+    - name: "Yard"
+      gpio: 13
       ml_per_pulse: 9.26
 schema:
   mqtt_host: str
