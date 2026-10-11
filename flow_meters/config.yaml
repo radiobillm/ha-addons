@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.2.12"
+version: "0.2.13"
 slug: "flow_meters"
 description: "GPIO pulse-counting water flow meters (Cistern, City, House, Yard) published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -25,7 +25,7 @@ boot: auto
 # returned store_app_not_found — survived both a fresh repo clone and a
 # Supervisor restart, so it wasn't a caching issue). Reverted pending
 # investigation into the exact valid schema/placement. Set watchdog via
-# a runtime options POST instead (see brett-water-rpi-mqtt-pivot memory) —
+# a runtime options POST instead (see waterpi-software doc) —
 # confirmed to work, just doesn't survive an uninstall/reinstall cycle.
 options:
   mqtt_host: "core-mosquitto"
@@ -63,7 +63,7 @@ options:
   # the hat's footprint (pins 27+) mattered more than which specific GPIO
   # numbers were used. Sensor-to-pin assignment below matches Bill's ACTUAL
   # physical wiring (confirmed against his own pin labels, not a guessed
-  # City/Cistern/House/Fill-Cistern order) — see brett-water-rpi-mqtt-pivot
+  # City/Cistern/House/Fill-Cistern order) — see waterpi-software
   # memory for the full pin plan including the new ADS1115/AquaPlumb
   # water-level sensor (separate from this add-on for now).
   # 2026-09-19: "Fill-Cistern" (GPIO13) renamed to "Yard" - that line no
@@ -76,7 +76,7 @@ options:
   # unique_id churn this causes (orphans the old flow_meters_fill_
   # cistern_* entities) - Bill explicitly asked to "zero counters" too,
   # so a clean break was wanted, not a relabel-in-place. See that day's
-  # entry in brett-water-rpi-mqtt-pivot memory for the full sequence
+  # entry in waterpi-software doc for the full sequence
   # (also required an add-on uninstall+reinstall to actually zero the
   # other 3 sensors' totals.json, since options-only changes don't
   # touch persisted state).
@@ -108,3 +108,5 @@ schema:
     - name: str
       gpio: int(2,27)
       ml_per_pulse: float
+      # optional flow-rate curve "hz:ml,hz:ml,..." (see flow_meters.py docstring)
+      curve: "str?"

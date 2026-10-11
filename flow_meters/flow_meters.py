@@ -14,6 +14,15 @@ confirm or correct it:
     ml_per_pulse = (known fill volume in mL) / (pulses counted during that fill)
 
 Then edit the add-on's ml_per_pulse option for that sensor and restart.
+
+Flow-rate curve (v0.2.13): these paddlewheel sensors are not linear - they
+under-read at low flow and over-read at high flow, so one ml_per_pulse can't
+fit. A sensor may carry an optional `curve` option, a string of
+"hz:ml,hz:ml,..." knots (pulse rate in Hz -> mL per pulse at that rate).
+Each publish interval's pulses are valued at the mL/pulse interpolated
+linearly between knots for that interval's pulse rate (flat beyond the
+first/last knot). With no curve the flat ml_per_pulse applies, as before.
+Curves are fitted against the city meter: water/calibration/curve/.
 """
 
 import json
@@ -40,6 +49,35 @@ DEVICE = {
 
 def slug(name):
     return name.lower().replace(" ", "_").replace("-", "_")
+
+
+def parse_curve(text):
+    """ "0.2:323,1:49.6,8:39" -> [(0.2, 323.0), (1.0, 49.6), (8.0, 39.0)], or None if empty/invalid."""
+    if not text or not str(text).strip():
+        return None
+    try:
+        pts = sorted((float(h), float(m)) for h, m in (p.split(":") for p in str(text).split(",") if p.strip()))
+    except ValueError:
+        print(f"WARN: bad curve '{text}' - using flat ml_per_pulse", flush=True)
+        return None
+    if len(pts) < 2 or any(m <= 0 for _, m in pts):
+        print(f"WARN: bad curve '{text}' - using flat ml_per_pulse", flush=True)
+        return None
+    return pts
+
+
+def ml_per_pulse_at(curve, hz, flat):
+    """mL per pulse at this pulse rate: linear between curve knots, flat beyond the ends."""
+    if not curve:
+        return flat
+    if hz <= curve[0][0]:
+        return curve[0][1]
+    if hz >= curve[-1][0]:
+        return curve[-1][1]
+    for (h0, m0), (h1, m1) in zip(curve, curve[1:]):
+        if hz <= h1:
+            return m0 + (m1 - m0) * (hz - h0) / (h1 - h0)
+    return curve[-1][1]
 
 
 def load_json(path, default):
@@ -94,7 +132,9 @@ def main():
         pin = int(s["gpio"])
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.add_event_detect(pin, GPIO.FALLING, callback=make_callback(s["name"]), bouncetime=debounce_ms)
-        print(f"Watching '{s['name']}' on GPIO{pin} (ml_per_pulse={s.get('ml_per_pulse', 1.0)})", flush=True)
+        s["_curve"] = parse_curve(s.get("curve"))
+        print(f"Watching '{s['name']}' on GPIO{pin} (ml_per_pulse={s.get('ml_per_pulse', 1.0)}, "
+              f"curve={s['_curve'] or 'none'})", flush=True)
 
     client = mqtt.Client(client_id="flow_meters_addon")
     if mqtt_user:
@@ -187,8 +227,9 @@ def main():
         for s in sensors:
             name = s["name"]
             sid = slug(name)
-            ml_per_pulse = float(s.get("ml_per_pulse", 1.0))
             pulses = snapshot[name]
+            ml_per_pulse = ml_per_pulse_at(s.get("_curve"), pulses / publish_interval,
+                                           float(s.get("ml_per_pulse", 1.0)))
             volume_l = (pulses * ml_per_pulse) / 1000.0
             rate_lpm = (volume_l / publish_interval) * 60.0
             totals_l[name] += volume_l

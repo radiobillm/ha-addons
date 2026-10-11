@@ -45,7 +45,7 @@ FLOW_EPSILON_LPM = 0.05  # below this, a sensor counts as "not flowing"
 
 # Display-only labels (2026-09-02), matching the HA dashboard card's
 # directional Fr:/To: naming (per Bill's own pin labels — see the pin/GPIO
-# table in the hq-water-rpi-mqtt-pivot memory). DISPLAY TEXT ONLY: keys are
+# table in the brett-water-rpi-mqtt-pivot memory). DISPLAY TEXT ONLY: keys are
 # the config.yaml sensor `name` values, which stay unchanged everywhere
 # else (MQTT topic slugs, HA entity unique_ids) — renaming those would
 # orphan the existing entities rather than relabel them (see the earlier
@@ -53,7 +53,16 @@ FLOW_EPSILON_LPM = 0.05  # below this, a sensor counts as "not flowing"
 # back to the raw name for any sensor not in this map.
 _DISPLAY_LABELS = {
     "House": "To House",
-    "Fill-Cistern": "To Cistern",
+    "Yard": "To Yard",  # 2026-09-19: was "Fill-Cistern": "To Cistern" - that
+    # line now feeds the yard, not the cistern (real plumbing change, see
+    # config.yaml's dated comment + brett-water-rpi-mqtt-pivot memory).
+    # NOT YET DEPLOYED to the running image as of this edit - this file
+    # is baked into the Docker image (ghcr.io/radiobillm/flow-meters-addon),
+    # unlike config.yaml's `sensors` list which is a runtime option. Until
+    # a rebuild+push+update cycle happens, the LCD falls back to the raw
+    # name ("Yard", via _display_label()'s .get(name, name) below) instead
+    # of "To Yard" - harmless (still correct, just missing the directional
+    # prefix), not worth a rebuild on its own.
     "City": "Fr City",
     "Cistern": "Fr Cistern",
 }
@@ -64,14 +73,22 @@ def _display_label(name):
 
 
 _COLORS = {
+    # Values >1 (0-100 scale), not 0/1: Character_LCD_RGB.color's non-PWM
+    # fallback does `pin.value = not color[number] > 1`, so a channel value
+    # of 1 fails that `>1` check and reads as "off" - despite the library's
+    # own docstring claiming "non-zero is on". Confirmed empirically
+    # 2026-09-27: every entry below evaluated identically to "off" when
+    # this dict used 0/1, which is why the backlight looked dead on both
+    # the old AND the replacement board - a software bug, not a solder
+    # fault. Any value >1 works; 100 matches the library's documented scale.
     "off": [0, 0, 0],
-    "red": [1, 0, 0],
-    "green": [0, 1, 0],
-    "blue": [0, 0, 1],
-    "yellow": [1, 1, 0],
-    "cyan": [0, 1, 1],
-    "magenta": [1, 0, 1],
-    "white": [1, 1, 1],
+    "red": [100, 0, 0],
+    "green": [0, 100, 0],
+    "blue": [0, 0, 100],
+    "yellow": [100, 100, 0],
+    "cyan": [0, 100, 100],
+    "magenta": [100, 0, 100],
+    "white": [100, 100, 100],
 }
 
 
