@@ -1,7 +1,7 @@
 name: "Flow Meters"
-version: "0.2.14"
+version: "0.3.0"
 slug: "flow_meters"
-description: "GPIO pulse-counting water flow meters (Cistern, City, House, Yard) published to MQTT"
+description: "Water flow meters, pressure sensors and pump contacts on the waterpi interposer board, published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
 # Pre-built on the Mac (via colima) and pushed to ghcr.io, rather than
 # built on-device: the Pi 3 B+'s 1GB RAM struggled with local builds, AND
@@ -32,8 +32,34 @@ options:
   mqtt_port: 1883
   mqtt_username: ""
   mqtt_password: ""
-  debounce_ms: 20
+  debounce_ms: 2
+  # Interposer board (2026-10-12): its 74LVC14 buffer inverts and drives the
+  # GPIO, so count rising edges with no internal pull. Bare open-collector
+  # sensors wired straight to the header need falling / up instead.
+  pulse_edge: "rising"
+  pulse_pull: "off"
   publish_interval_s: 5
+  # Pressure transducers (0.5-4.5 V ratiometric) on ADS1115 0x48 A0-A2.
+  # full_scale_psi: 80 or 100 depending on which transducer is on that leg.
+  analog_interval_s: 5
+  pressure_sensors:
+    - name: "A"
+      channel: 0
+      full_scale_psi: 100
+    - name: "B"
+      channel: 1
+      full_scale_psi: 100
+    - name: "C"
+      channel: 2
+      full_scale_psi: 100
+  # Dry-contact inputs on the AUX plug; contact closed = on.
+  aux_inputs:
+    - name: "Cistern Pump Running"
+      gpio: 16
+      device_class: "running"
+    - name: "Cistern Pump Fault"
+      gpio: 20
+      device_class: "problem"
   # Adafruit i2c 16x2 RGB LCD Pi Plate. Display is flow-driven (see
   # lcd_ui.py): "No flow" when all sensors are quiet; the 1-2 currently
   # flowing sensors shown directly, one per row; with 3-4 flowing it
@@ -99,6 +125,17 @@ schema:
   mqtt_username: str
   mqtt_password: password
   debounce_ms: int(1,200)
+  pulse_edge: "list(falling|rising)"
+  pulse_pull: "list(up|off)"
+  analog_interval_s: int(1,300)
+  pressure_sensors:
+    - name: str
+      channel: int(0,3)
+      full_scale_psi: float
+  aux_inputs:
+    - name: str
+      gpio: int(2,27)
+      device_class: "str?"
   publish_interval_s: int(1,60)
   enable_lcd: bool
   lcd_color: "list(red|green|blue|yellow|cyan|magenta|white|off)"
@@ -110,3 +147,5 @@ schema:
       ml_per_pulse: float
       # optional flow-rate curve "hz:ml,hz:ml,..." (see flow_meters.py docstring)
       curve: "str?"
+      # drop lone pulses on a leg that should read zero (see flow_meters.py docstring)
+      stray_pulse_max: "int(0,10)?"

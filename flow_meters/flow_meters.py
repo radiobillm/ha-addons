@@ -23,6 +23,21 @@ Each publish interval's pulses are valued at the mL/pulse interpolated
 linearly between knots for that interval's pulse rate (flat beyond the
 first/last knot). With no curve the flat ml_per_pulse applies, as before.
 Curves are fitted against the city meter: water/calibration/curve/.
+
+v0.3.0 (interposer board):
+- `pulse_edge` / `pulse_pull`: the board's 74LVC14 buffer inverts and drives
+  the GPIO, so count RISING edges with no internal pull.
+- per-sensor `stray_pulse_max`: an interval with at most that many pulses,
+  right after a silent interval, is held back; it is added to the next
+  interval if flow continues and dropped if the next interval is silent too.
+  Removes the lone rotor-twitch pulses a dead leg shows when the pump starts.
+  It also drops real trickle flow, so use it only on a sensor that should
+  read zero. The Pulse Count entity stays raw.
+- `pressure_sensors`: ratiometric 0.5-4.5 V transducers on ADS1115 0x48
+  through the board's x0.6 dividers, corrected by the 5 V analog rail
+  measured on ADS1115 0x49 A0. The flow rail is on 0x49 A1.
+- `aux_inputs`: dry-contact inputs (pump RUN / FAULT), HIGH = contact closed,
+  published as MQTT binary_sensors.
 """
 
 import json
@@ -124,6 +139,39 @@ def scan_i2c(bus=1):
     return " ".join(found) or "none"
 
 
+class Ads1115:
+    """Single-shot reads from an ADS1115 over /dev/i2c-<bus>, no extra libraries."""
+    LSB_V = 4.096 / 32768.0  # PGA +-4.096 V
+
+    def __init__(self, addr, bus=1):
+        import fcntl
+        self.fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
+        fcntl.ioctl(self.fd, 0x0703, addr)  # I2C_SLAVE
+
+    def volts(self, ch, samples=4):
+        cfg = 0x8000 | ((4 + ch) << 12) | (1 << 9) | (1 << 8) | (4 << 5) | 3  # AINch-GND, single-shot, 128 SPS
+        total = 0
+        for _ in range(samples):
+            os.write(self.fd, bytes([0x01, cfg >> 8, cfg & 0xFF]))
+            time.sleep(0.011)
+            os.write(self.fd, b"\x00")
+            raw = int.from_bytes(os.read(self.fd, 2), "big", signed=True)
+            total += raw
+        return total / samples * self.LSB_V
+
+
+DIVIDER = 0.6  # board divider on every 5 V-referenced analog input
+
+
+def pressure_psi(v_adc, v5, full_scale):
+    """0.5-4.5 V ratiometric transducer -> psi, or None if the sensor looks absent."""
+    k = v5 / 5.0
+    vs = v_adc / DIVIDER
+    if k < 0.8 or vs < 0.25 * k:  # rail down, or below any valid output: unplugged / broken wire
+        return None
+    return (vs - 0.5 * k) / (4.0 * k) * full_scale
+
+
 def main():
     print(f"I2C bus 1 devices: {scan_i2c()}", flush=True)
     opts = load_json(OPTIONS_PATH, {})
@@ -134,6 +182,11 @@ def main():
     debounce_ms = int(opts.get("debounce_ms", 20))
     publish_interval = int(opts.get("publish_interval_s", 5))
     sensors = opts.get("sensors", [])
+    edge = GPIO.RISING if opts.get("pulse_edge", "falling") == "rising" else GPIO.FALLING
+    pull = GPIO.PUD_OFF if opts.get("pulse_pull", "up") == "off" else GPIO.PUD_UP
+    pressure_sensors = opts.get("pressure_sensors", [])
+    aux_inputs = opts.get("aux_inputs", [])
+    analog_interval = int(opts.get("analog_interval_s", 5))
 
     if not sensors:
         print("ERROR: no sensors configured", flush=True)
@@ -159,11 +212,16 @@ def main():
 
     for s in sensors:
         pin = int(s["gpio"])
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.add_event_detect(pin, GPIO.FALLING, callback=make_callback(s["name"]), bouncetime=debounce_ms)
+        GPIO.setup(pin, GPIO.IN, pull_up_down=pull)
+        GPIO.add_event_detect(pin, edge, callback=make_callback(s["name"]), bouncetime=debounce_ms)
         s["_curve"] = parse_curve(s.get("curve"))
+        s["_stray_max"] = int(s.get("stray_pulse_max") or 0)
+        s["_held"] = 0
+        s["_prev_raw"] = 0
         print(f"Watching '{s['name']}' on GPIO{pin} (ml_per_pulse={s.get('ml_per_pulse', 1.0)}, "
-              f"curve={s['_curve'] or 'none'})", flush=True)
+              f"curve={s['_curve'] or 'none'}, stray_pulse_max={s['_stray_max']})", flush=True)
+    print(f"Pulse inputs: edge={opts.get('pulse_edge', 'falling')}, pull={opts.get('pulse_pull', 'up')}, "
+          f"debounce={debounce_ms} ms", flush=True)
 
     client = mqtt.Client(client_id="flow_meters_addon")
     if mqtt_user:
@@ -216,6 +274,97 @@ def main():
 
     publish_discovery()
 
+    # ---- dry-contact inputs (pump RUN / FAULT): HIGH = contact closed ----
+    def publish_aux(a):
+        client.publish(f"{BASE_TOPIC}/aux/{slug(a['name'])}/state",
+                       "ON" if GPIO.input(int(a["gpio"])) else "OFF", retain=True)
+
+    for a in aux_inputs:
+        pin = int(a["gpio"])
+        aid = slug(a["name"])
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+        cfg = {
+            "name": a["name"],
+            "unique_id": f"flow_meters_aux_{aid}",
+            "state_topic": f"{BASE_TOPIC}/aux/{aid}/state",
+            "device": DEVICE,
+        }
+        if a.get("device_class"):
+            cfg["device_class"] = a["device_class"]
+        client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/flow_meters/{aid}/config", json.dumps(cfg), retain=True)
+        GPIO.add_event_detect(pin, GPIO.BOTH, callback=lambda _ch, a=a: publish_aux(a), bouncetime=20)
+        publish_aux(a)
+        print(f"Aux input '{a['name']}' on GPIO{pin}: {'closed' if GPIO.input(pin) else 'open'}", flush=True)
+
+    # ---- analog: pressure transducers + 5 V rails ----
+    def analog_sensor_config(key, name, unit, device_class, diagnostic=False):
+        cfg = {
+            "name": name,
+            "unique_id": f"flow_meters_{key}",
+            "state_topic": f"{BASE_TOPIC}/analog/{key}",
+            "unit_of_measurement": unit,
+            "device_class": device_class,
+            "state_class": "measurement",
+            "availability_topic": f"{BASE_TOPIC}/analog/{key}/available",
+            "device": DEVICE,
+        }
+        if diagnostic:
+            cfg["entity_category"] = "diagnostic"
+        client.publish(f"{DISCOVERY_PREFIX}/sensor/flow_meters/{key}/config", json.dumps(cfg), retain=True)
+
+    def analog_loop():
+        try:
+            ads1, ads2 = Ads1115(0x48), Ads1115(0x49)
+        except OSError as e:
+            print(f"WARN: analog disabled, cannot open I2C: {e}", flush=True)
+            return
+        analog_sensor_config("rail_5v_analog", "5V Analog Rail", "V", "voltage", diagnostic=True)
+        analog_sensor_config("rail_5v_flow", "5V Flow Rail", "V", "voltage", diagnostic=True)
+        for ps in pressure_sensors:
+            pid = slug(ps["name"])
+            analog_sensor_config(f"pressure_{pid}", f"Pressure {ps['name']}", "psi", "pressure")
+            analog_sensor_config(f"pressure_{pid}_volts", f"Pressure {ps['name']} Sensor Voltage", "V", "voltage",
+                                 diagnostic=True)
+        last = {}  # key -> (value, time published)
+
+        def put(key, value, digits):
+            now = time.time()
+            if value is None:
+                if last.get(key, (0, 0))[0] is not None:
+                    client.publish(f"{BASE_TOPIC}/analog/{key}/available", "offline", retain=True)
+                    last[key] = (None, now)
+                return
+            value = round(value, digits)
+            prev = last.get(key)
+            if prev is None or prev[0] is None:
+                client.publish(f"{BASE_TOPIC}/analog/{key}/available", "online", retain=True)
+            if prev is None or prev[0] != value or now - prev[1] >= 60:  # on change, and once a minute
+                client.publish(f"{BASE_TOPIC}/analog/{key}", value)
+                last[key] = (value, now)
+
+        first = True
+        while running:
+            try:
+                v5a = ads2.volts(0) / DIVIDER
+                v5f = ads2.volts(1) / DIVIDER
+                put("rail_5v_analog", v5a, 2)
+                put("rail_5v_flow", v5f, 2)
+                msg = [f"5VA={v5a:.3f} V", f"5VF={v5f:.3f} V"]
+                for ps in pressure_sensors:
+                    pid = slug(ps["name"])
+                    v = ads1.volts(int(ps["channel"]))
+                    psi = pressure_psi(v, v5a, float(ps.get("full_scale_psi", 100)))
+                    put(f"pressure_{pid}_volts", v / DIVIDER, 3)
+                    put(f"pressure_{pid}", psi, 1)
+                    msg.append(f"{ps['name']}={v / DIVIDER:.3f} V -> "
+                               + (f"{psi:.1f} psi" if psi is not None else "no sensor"))
+                if first:
+                    print("Analog first read: " + ", ".join(msg), flush=True)
+                    first = False
+            except OSError as e:
+                print(f"WARN: analog read failed: {e}", flush=True)
+            time.sleep(analog_interval)
+
     lcd_ui = None
     if opts.get("enable_lcd", True):
         def get_reading(name):
@@ -246,6 +395,10 @@ def main():
     signal.signal(signal.SIGTERM, handle_sig)
     signal.signal(signal.SIGINT, handle_sig)
 
+    if pressure_sensors or opts.get("enable_analog", False):
+        threading.Thread(target=analog_loop, daemon=True).start()
+    aux_tick = 0
+
     while running:
         time.sleep(publish_interval)
         with lock:
@@ -256,14 +409,22 @@ def main():
         for s in sensors:
             name = s["name"]
             sid = slug(name)
-            pulses = snapshot[name]
+            raw = snapshot[name]
+            pulses = raw
+            if s["_stray_max"]:
+                if s["_held"]:  # held from the last interval: keep it only if flow continued
+                    pulses = raw + s["_held"] if raw else 0
+                    s["_held"] = 0
+                elif 0 < raw <= s["_stray_max"] and s["_prev_raw"] == 0:
+                    s["_held"], pulses = raw, 0
+                s["_prev_raw"] = raw
             ml_per_pulse = ml_per_pulse_at(s.get("_curve"), pulses / publish_interval,
                                            float(s.get("ml_per_pulse", 1.0)))
             volume_l = (pulses * ml_per_pulse) / 1000.0
             rate_lpm = (volume_l / publish_interval) * 60.0
             totals_l[name] += volume_l
 
-            client.publish(f"{BASE_TOPIC}/{sid}/pulses", pulses)
+            client.publish(f"{BASE_TOPIC}/{sid}/pulses", raw)
             client.publish(f"{BASE_TOPIC}/{sid}/rate_lpm", round(rate_lpm, 3))
             client.publish(f"{BASE_TOPIC}/{sid}/total_l", round(totals_l[name], 3))
 
@@ -272,6 +433,12 @@ def main():
 
         if any(snapshot.values()):  # only touch the SD card when something flowed
             save_totals(totals_l)
+
+        aux_tick += 1
+        if aux_tick * publish_interval >= 60:  # re-assert contact states once a minute
+            aux_tick = 0
+            for a in aux_inputs:
+                publish_aux(a)
 
     if lcd_ui is not None:
         lcd_ui.stop()
