@@ -26,6 +26,7 @@ Curves are fitted against the city meter: water/calibration/curve/.
 """
 
 import json
+import os
 import signal
 import sys
 import threading
@@ -89,14 +90,42 @@ def load_json(path, default):
 
 
 def save_totals(totals):
+    # Write to a temp file and rename, so a power cut mid-write can't leave an
+    # empty totals.json (that zeroed every total on 2026-10-12).
     try:
-        with open(TOTALS_PATH, "w") as f:
+        tmp = TOTALS_PATH + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(totals, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TOTALS_PATH)
     except OSError as e:
         print(f"WARN: could not save totals: {e}", flush=True)
 
 
+def scan_i2c(bus=1):
+    """Addresses that ACK a 1-byte read on /dev/i2c-<bus> (startup log only)."""
+    import fcntl
+    found = []
+    try:
+        fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
+    except OSError as e:
+        return f"unavailable ({e})"
+    try:
+        for addr in range(0x08, 0x78):
+            try:
+                fcntl.ioctl(fd, 0x0703, addr)  # I2C_SLAVE
+                os.read(fd, 1)
+                found.append(f"0x{addr:02x}")
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+    return " ".join(found) or "none"
+
+
 def main():
+    print(f"I2C bus 1 devices: {scan_i2c()}", flush=True)
     opts = load_json(OPTIONS_PATH, {})
     mqtt_host = opts.get("mqtt_host", "core-mosquitto")
     mqtt_port = int(opts.get("mqtt_port", 1883))
@@ -241,7 +270,8 @@ def main():
             with latest_lock:
                 latest_rate_lpm[name] = rate_lpm
 
-        save_totals(totals_l)
+        if any(snapshot.values()):  # only touch the SD card when something flowed
+            save_totals(totals_l)
 
     if lcd_ui is not None:
         lcd_ui.stop()
