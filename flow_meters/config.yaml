@@ -1,5 +1,5 @@
 name: "Flow Meters"
-version: "0.3.2"
+version: "0.3.3"
 slug: "flow_meters"
 description: "Water flow meters, pressure sensors and pump contacts on the waterpi interposer board, published to MQTT"
 url: "https://github.com/yo1dog/rpi-flow-meters"
@@ -77,6 +77,7 @@ options:
   lcd_color: "red"
   lcd_refresh_s: 0.5
   button_poll_s: 0.05
+  lcd_moving_pressure: "House"
   # ml_per_pulse default of 9.26 = 1000mL / 108 pulses/liter, per the
   # YF-DN32-S-SM (stainless) datasheet. UNVERIFIED for your actual unit —
   # confirm with a timed-fill test against the raw Pulse Count entity
@@ -141,6 +142,7 @@ schema:
   lcd_color: "list(red|green|blue|yellow|cyan|magenta|white|off)"
   lcd_refresh_s: float
   button_poll_s: float
+  lcd_moving_pressure: "str?"
   sensors:
     - name: str
       gpio: int(2,27)

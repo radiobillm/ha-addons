@@ -17,10 +17,12 @@ a DISPLAY-ONLY mapping (see _DISPLAY_LABELS below) to the same Fr:/To:
 directional names used on the HA dashboard card — the underlying sensor
 name (config.yaml, MQTT topics, HA entity ids) is untouched.
 
-Pressure pages (v0.3.1): when pressure sensors are configured, the automatic
-display rotates: the flow view above for ROTATE_FLOW_S, then the pressure
-sensors two per page for ROTATE_PRESSURE_S each ("Source:  51.0psi"), in the
-order they are listed in the add-on's `pressure_sensors` option.
+Pressure in the automatic display (v0.3.3, replacing 0.3.1's rotating pressure
+pages): only ONE pressure sensor (House by default) and only while it is
+moving - a swing of MOVING_PSI or more within MOVING_WINDOW_S, held for
+MOVING_HOLD_S after the last such swing. While moving it is shown as one more
+row ("House:   51.3psi") alongside whatever is flowing, so at rest the display
+is just the flow view / "No flow" and does not flip on sensor noise.
 
 Buttons (v0.3.1, replacing the old UP/DOWN fixed-pair paging): any press
 stops the rotation and shows ONE sensor on its own - first the flow sensors
@@ -45,8 +47,9 @@ import busio
 
 GALLON_PER_LITER = 0.264172
 MANUAL_HOLD_S = 30  # seconds of no button press before the rotation resumes
-ROTATE_FLOW_S = 4.0  # how long the flow view stays up in the rotation
-ROTATE_PRESSURE_S = 3.0  # how long each pressure page stays up in the rotation
+MOVING_PSI = 0.4  # pressure swing that counts as "moving" (rest noise is about 0.1-0.2)
+MOVING_WINDOW_S = 20.0  # ... within this many seconds
+MOVING_HOLD_S = 20.0  # keep showing the pressure this long after the last swing
 SCROLL_INTERVAL_S = 2.0  # how often the display advances when 3+ sensors are flowing
 FLOW_EPSILON_LPM = 0.05  # below this, a sensor counts as "not flowing"
 
@@ -143,7 +146,7 @@ def _format_pressure_row(label, psi, num_cols):
 
 class LcdUi(threading.Thread):
     def __init__(self, sensor_names, get_reading, color="red", refresh_s=0.5, poll_s=0.05,
-                 pressure_names=(), get_pressure=None, get_total=None):
+                 pressure_names=(), get_pressure=None, get_total=None, moving_pressure="House"):
         super().__init__(daemon=True)
         self._sensor_names = list(sensor_names)
         self._get_reading = get_reading  # callable(name) -> rate_lpm (float) or None
@@ -166,11 +169,12 @@ class LcdUi(threading.Thread):
                        + [("pressure", n) for n in self._pressure_names])
         self._item_num = -1  # first press lands on item 0
         self._last_manual_s = -MANUAL_HOLD_S  # rotation active from the start
-        # pressure sensors two per page for the rotation
-        self._pressure_pages = [
-            self._pressure_names[i:i + self._num_rows]
-            for i in range(0, len(self._pressure_names), self._num_rows)
-        ]
+        # the one pressure sensor the automatic display shows while it is moving
+        self._moving_name = moving_pressure if moving_pressure in self._pressure_names else None
+        self._psi_hist = []  # (monotonic s, psi) samples within MOVING_WINDOW_S
+        self._last_sample_s = 0.0
+        self._last_moving_s = -MOVING_HOLD_S
+        self._last_rows = None  # what is on the glass now; unchanged rows are not rewritten
 
         self._lcd.color = self._color
         self._lcd.display = True
@@ -189,54 +193,46 @@ class LcdUi(threading.Thread):
             self._item_num = (self._item_num + delta) % len(self._items)
         self._last_manual_s = now
 
-    def _active_sensors(self):
-        """Sensor names currently flowing, in configured order."""
-        active = []
+    def _track_pressure(self, now):
+        """Sample the watched pressure about once a second; note when it is moving."""
+        if self._moving_name is None or now - self._last_sample_s < 1.0:
+            return
+        self._last_sample_s = now
+        psi = self._get_pressure(self._moving_name)
+        if psi is None:
+            self._psi_hist = []
+            return
+        self._psi_hist = [(t, p) for t, p in self._psi_hist if now - t <= MOVING_WINDOW_S] + [(now, psi)]
+        values = [p for _, p in self._psi_hist]
+        if max(values) - min(values) >= MOVING_PSI:
+            self._last_moving_s = now
+
+    def _active_rows(self):
+        """One formatted row per flowing sensor, plus the pressure while it is moving."""
+        rows = []
         for name in self._sensor_names:
             rate = self._get_reading(name)
             if rate is not None and rate >= FLOW_EPSILON_LPM:
-                active.append(name)
-        return active
-
-    def _flow_rows(self, now):
-        active = self._active_sensors()
-        n = len(active)
-
-        if n == 0:
-            return ["No flow".center(self._num_cols), " " * self._num_cols]
-
-        if n == 1:
-            return [_format_row(_display_label(active[0]), self._get_reading(active[0]), self._num_cols),
-                    " " * self._num_cols]
-
-        if n == 2:
-            shown = active
-        else:
-            # 3 or 4 active: scroll through non-overlapping pairs, wrapping.
-            num_windows = (n + 1) // 2
-            window_idx = int(now // SCROLL_INTERVAL_S) % num_windows
-            start = window_idx * 2
-            shown = [active[start % n], active[(start + 1) % n]]
-
-        return [_format_row(_display_label(shown[0]), self._get_reading(shown[0]), self._num_cols),
-                _format_row(_display_label(shown[1]), self._get_reading(shown[1]), self._num_cols)]
-
-    def _pressure_rows(self, names):
-        rows = [_format_pressure_row(_pressure_label(n), self._get_pressure(n), self._num_cols) for n in names]
-        while len(rows) < self._num_rows:
-            rows.append(" " * self._num_cols)
+                rows.append(_format_row(_display_label(name), rate, self._num_cols))
         return rows
 
     def _auto_rows(self, now):
-        """Rotation: flow view, then each pressure page."""
-        if not self._pressure_pages:
-            return self._flow_rows(now)
-        cycle = ROTATE_FLOW_S + ROTATE_PRESSURE_S * len(self._pressure_pages)
-        pos = now % cycle
-        if pos < ROTATE_FLOW_S:
-            return self._flow_rows(now)
-        page = int((pos - ROTATE_FLOW_S) // ROTATE_PRESSURE_S)
-        return self._pressure_rows(self._pressure_pages[min(page, len(self._pressure_pages) - 1)])
+        blank = " " * self._num_cols
+        rows = self._active_rows()
+        if self._moving_name is not None and now - self._last_moving_s < MOVING_HOLD_S:
+            rows.append(_format_pressure_row(_pressure_label(self._moving_name),
+                                             self._get_pressure(self._moving_name), self._num_cols))
+        n = len(rows)
+        if n == 0:
+            return ["No flow".center(self._num_cols), blank]
+        if n == 1:
+            return [rows[0], blank]
+        if n == 2:
+            return rows
+        # 3 or more: scroll through non-overlapping pairs, wrapping.
+        num_windows = (n + 1) // 2
+        start = (int(now // SCROLL_INTERVAL_S) % num_windows) * 2
+        return [rows[start % n], rows[(start + 1) % n]]
 
     def _manual_rows(self):
         kind, name = self._items[self._item_num]
@@ -256,9 +252,12 @@ class LcdUi(threading.Thread):
             rows = self._auto_rows(now)
         # No .clear() here (unlike the original port): every row above is
         # always padded to exactly _num_cols, so .message fully overwrites
-        # the previous content on its own — clearing first just produced a
-        # visible blank-then-redraw flicker on every refresh for no benefit.
-        self._lcd.message = "\n".join(rows)
+        # the previous content on its own. Unchanged text is not rewritten at
+        # all (v0.3.3): a full write is some hundreds of I2C transfers, and
+        # doing that twice a second left little time to notice a button tap.
+        if rows != self._last_rows:
+            self._lcd.message = "\n".join(rows)
+            self._last_rows = rows
 
     def run(self):
         now = time.monotonic()
@@ -271,15 +270,14 @@ class LcdUi(threading.Thread):
             lcd = self._lcd
             nxt = lcd.down_button or lcd.select_button
             prev = lcd.up_button
-            if nxt and not was_next:
-                self._step(+1, now)
+            if (nxt and not was_next) or (prev and not was_prev):
+                self._step(+1 if nxt and not was_next else -1, now)
                 self._draw(now)
                 last_redraw = now
-            elif prev and not was_prev:
-                self._step(-1, now)
-                self._draw(now)
-                last_redraw = now
+                print(f"LCD button: {'next' if nxt and not was_next else 'previous'} -> "
+                      f"{self._items[self._item_num][1] if self._items else '-'}", flush=True)
             was_next, was_prev = nxt, prev
+            self._track_pressure(now)
 
             if now - last_redraw >= self._refresh_s:
                 self._draw(now)

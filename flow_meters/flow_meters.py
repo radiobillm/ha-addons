@@ -384,6 +384,7 @@ def main():
                 pressure_names=[ps["name"] for ps in pressure_sensors],
                 get_pressure=latest_psi.get,
                 get_total=lambda name: totals_l[name] * 0.264172,
+                moving_pressure=opts.get("lcd_moving_pressure", "House"),
                 color=opts.get("lcd_color", "red"),
                 refresh_s=float(opts.get("lcd_refresh_s", 0.5)),
                 poll_s=float(opts.get("button_poll_s", 0.05)),
