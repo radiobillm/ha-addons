@@ -25,8 +25,8 @@ order they are listed in the add-on's `pressure_sensors` option.
 Buttons (v0.3.1, replacing the old UP/DOWN fixed-pair paging): any press
 stops the rotation and shows ONE sensor on its own - first the flow sensors
 in configured order (rate on row 1, total gallons on row 2), then the
-pressure sensors. DOWN / RIGHT / SELECT step to the next one, UP / LEFT to
-the previous one. After MANUAL_HOLD_S (30 s) without a press the rotation
+pressure sensors. DOWN (or SELECT) steps to the next one, UP to the previous
+one; LEFT and RIGHT are ignored (v0.3.2). After MANUAL_HOLD_S (30 s) without a press the rotation
 resumes.
 
 Uses adafruit_character_lcd.character_lcd_rgb_i2c.Character_LCD_RGB_I2C —
@@ -269,8 +269,8 @@ class LcdUi(threading.Thread):
             now = time.monotonic()
 
             lcd = self._lcd
-            nxt = lcd.down_button or lcd.right_button or lcd.select_button
-            prev = lcd.up_button or lcd.left_button
+            nxt = lcd.down_button or lcd.select_button
+            prev = lcd.up_button
             if nxt and not was_next:
                 self._step(+1, now)
                 self._draw(now)
