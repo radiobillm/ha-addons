@@ -17,12 +17,17 @@ a DISPLAY-ONLY mapping (see _DISPLAY_LABELS below) to the same Fr:/To:
 directional names used on the HA dashboard card — the underlying sensor
 name (config.yaml, MQTT topics, HA entity ids) is untouched.
 
-UP/DOWN buttons still manually page through the two old fixed pairs
-(City/Cistern, House/Fill-Cistern) for a manual/diagnostic look at a
-specific sensor regardless of flow state — same as before, pauses the
-automatic flow-driven display above for AUTO_FOLLOW_IDLE_S seconds after
-a press, then reverts to it. SELECT/LEFT/RIGHT remain unbound, same as
-the old code.
+Pressure pages (v0.3.1): when pressure sensors are configured, the automatic
+display rotates: the flow view above for ROTATE_FLOW_S, then the pressure
+sensors two per page for ROTATE_PRESSURE_S each ("Source:  51.0psi"), in the
+order they are listed in the add-on's `pressure_sensors` option.
+
+Buttons (v0.3.1, replacing the old UP/DOWN fixed-pair paging): any press
+stops the rotation and shows ONE sensor on its own - first the flow sensors
+in configured order (rate on row 1, total gallons on row 2), then the
+pressure sensors. DOWN / RIGHT / SELECT step to the next one, UP / LEFT to
+the previous one. After MANUAL_HOLD_S (30 s) without a press the rotation
+resumes.
 
 Uses adafruit_character_lcd.character_lcd_rgb_i2c.Character_LCD_RGB_I2C —
 the SAME class the old code used (see its cistern.py) — which already
@@ -39,7 +44,9 @@ import board
 import busio
 
 GALLON_PER_LITER = 0.264172
-AUTO_FOLLOW_IDLE_S = 10  # seconds of no button press before auto display resumes
+MANUAL_HOLD_S = 30  # seconds of no button press before the rotation resumes
+ROTATE_FLOW_S = 4.0  # how long the flow view stays up in the rotation
+ROTATE_PRESSURE_S = 3.0  # how long each pressure page stays up in the rotation
 SCROLL_INTERVAL_S = 2.0  # how often the display advances when 3+ sensors are flowing
 FLOW_EPSILON_LPM = 0.05  # below this, a sensor counts as "not flowing"
 
@@ -67,9 +74,19 @@ _DISPLAY_LABELS = {
     "Cistern": "Fr Cistern",
 }
 
+# Pressure sensors get their own map: one of them is also called "House", and
+# it must not pick up the flow sensor's "To House".
+_PRESSURE_LABELS = {
+    "Mid-filter": "Mid",  # the full name does not fit beside a reading
+}
+
 
 def _display_label(name):
     return _DISPLAY_LABELS.get(name, name)
+
+
+def _pressure_label(name):
+    return _PRESSURE_LABELS.get(name, name)
 
 
 _COLORS = {
@@ -114,11 +131,25 @@ def _format_row(label, rate_lpm, num_cols):
     return (prefix + rate_str.rjust(max(0, num_cols - len(prefix))))[:num_cols]
 
 
+def _format_text_row(label, text, num_cols):
+    """"<label>:" left, text right-aligned to fill the row."""
+    prefix = label + ":"
+    return (prefix + text.rjust(max(0, num_cols - len(prefix))))[:num_cols]
+
+
+def _format_pressure_row(label, psi, num_cols):
+    return _format_text_row(label, "---" if psi is None else f"{psi:.1f}psi", num_cols)
+
+
 class LcdUi(threading.Thread):
-    def __init__(self, sensor_names, get_reading, color="red", refresh_s=0.5, poll_s=0.05):
+    def __init__(self, sensor_names, get_reading, color="red", refresh_s=0.5, poll_s=0.05,
+                 pressure_names=(), get_pressure=None, get_total=None):
         super().__init__(daemon=True)
         self._sensor_names = list(sensor_names)
         self._get_reading = get_reading  # callable(name) -> rate_lpm (float) or None
+        self._pressure_names = list(pressure_names) if get_pressure else []
+        self._get_pressure = get_pressure  # callable(name) -> psi (float) or None
+        self._get_total = get_total  # callable(name) -> total gallons (float) or None
         self._color = _COLORS.get(color, _COLORS["red"])
         self._refresh_s = refresh_s
         self._poll_s = poll_s
@@ -129,15 +160,17 @@ class LcdUi(threading.Thread):
         self._num_cols = 16
         self._num_rows = 2
 
-        # fixed pairs for manual button paging only (unrelated to the
-        # automatic flow-driven display) — same grouping as the old
-        # CisternUI.create_pages()
-        self._pages = [
-            self._sensor_names[i:i + self._num_rows]
-            for i in range(0, len(self._sensor_names), self._num_rows)
+        # one entry per sensor for the button-stepped single-sensor view:
+        # flow sensors first, then pressure sensors
+        self._items = ([("flow", n) for n in self._sensor_names]
+                       + [("pressure", n) for n in self._pressure_names])
+        self._item_num = -1  # first press lands on item 0
+        self._last_manual_s = -MANUAL_HOLD_S  # rotation active from the start
+        # pressure sensors two per page for the rotation
+        self._pressure_pages = [
+            self._pressure_names[i:i + self._num_rows]
+            for i in range(0, len(self._pressure_names), self._num_rows)
         ]
-        self._page_num = 0
-        self._last_manual_s = -AUTO_FOLLOW_IDLE_S  # auto display active from the start
 
         self._lcd.color = self._color
         self._lcd.display = True
@@ -146,13 +179,15 @@ class LcdUi(threading.Thread):
     def stop(self):
         self._stop_event.set()
 
-    def _go_next(self):
-        if len(self._pages) > 1:
-            self._page_num = (self._page_num + 1) % len(self._pages)
-
-    def _go_prev(self):
-        if len(self._pages) > 1:
-            self._page_num = (self._page_num - 1) % len(self._pages)
+    def _step(self, delta, now):
+        if not self._items:
+            return
+        if now - self._last_manual_s >= MANUAL_HOLD_S:
+            # coming from the rotation: start at the first sensor (or the last, going backwards)
+            self._item_num = 0 if delta > 0 else len(self._items) - 1
+        else:
+            self._item_num = (self._item_num + delta) % len(self._items)
+        self._last_manual_s = now
 
     def _active_sensors(self):
         """Sensor names currently flowing, in configured order."""
@@ -163,7 +198,7 @@ class LcdUi(threading.Thread):
                 active.append(name)
         return active
 
-    def _auto_rows(self, now):
+    def _flow_rows(self, now):
         active = self._active_sensors()
         n = len(active)
 
@@ -186,15 +221,36 @@ class LcdUi(threading.Thread):
         return [_format_row(_display_label(shown[0]), self._get_reading(shown[0]), self._num_cols),
                 _format_row(_display_label(shown[1]), self._get_reading(shown[1]), self._num_cols)]
 
-    def _manual_rows(self):
-        page = self._pages[self._page_num]
-        rows = [_format_row(_display_label(name), self._get_reading(name), self._num_cols) for name in page]
+    def _pressure_rows(self, names):
+        rows = [_format_pressure_row(_pressure_label(n), self._get_pressure(n), self._num_cols) for n in names]
         while len(rows) < self._num_rows:
             rows.append(" " * self._num_cols)
         return rows
 
+    def _auto_rows(self, now):
+        """Rotation: flow view, then each pressure page."""
+        if not self._pressure_pages:
+            return self._flow_rows(now)
+        cycle = ROTATE_FLOW_S + ROTATE_PRESSURE_S * len(self._pressure_pages)
+        pos = now % cycle
+        if pos < ROTATE_FLOW_S:
+            return self._flow_rows(now)
+        page = int((pos - ROTATE_FLOW_S) // ROTATE_PRESSURE_S)
+        return self._pressure_rows(self._pressure_pages[min(page, len(self._pressure_pages) - 1)])
+
+    def _manual_rows(self):
+        kind, name = self._items[self._item_num]
+        if kind == "flow":
+            label = _display_label(name)
+            total = self._get_total(name) if self._get_total else None
+            row2 = " " * self._num_cols if total is None else _format_text_row("Total", f"{total:,.0f}gal", self._num_cols)
+            return [_format_row(label, self._get_reading(name), self._num_cols), row2]
+        psi = self._get_pressure(name)
+        return [(_pressure_label(name) + " pressure")[:self._num_cols].ljust(self._num_cols),
+                ("---" if psi is None else f"{psi:.1f} psi").center(self._num_cols)]
+
     def _draw(self, now):
-        if now - self._last_manual_s < AUTO_FOLLOW_IDLE_S:
+        if self._items and now - self._last_manual_s < MANUAL_HOLD_S:
             rows = self._manual_rows()
         else:
             rows = self._auto_rows(now)
@@ -208,23 +264,22 @@ class LcdUi(threading.Thread):
         now = time.monotonic()
         self._draw(now)
         last_redraw = now
-        was_up = was_down = False
+        was_next = was_prev = False
         while not self._stop_event.is_set():
             now = time.monotonic()
 
-            up = self._lcd.up_button
-            down = self._lcd.down_button
-            if up and not was_up:
-                self._go_prev()
-                self._last_manual_s = now
+            lcd = self._lcd
+            nxt = lcd.down_button or lcd.right_button or lcd.select_button
+            prev = lcd.up_button or lcd.left_button
+            if nxt and not was_next:
+                self._step(+1, now)
                 self._draw(now)
                 last_redraw = now
-            elif down and not was_down:
-                self._go_next()
-                self._last_manual_s = now
+            elif prev and not was_prev:
+                self._step(-1, now)
                 self._draw(now)
                 last_redraw = now
-            was_up, was_down = up, down
+            was_next, was_prev = nxt, prev
 
             if now - last_redraw >= self._refresh_s:
                 self._draw(now)

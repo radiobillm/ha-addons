@@ -24,6 +24,9 @@ linearly between knots for that interval's pulse rate (flat beyond the
 first/last knot). With no curve the flat ml_per_pulse applies, as before.
 Curves are fitted against the city meter: water/calibration/curve/.
 
+v0.3.1: the LCD rotates through the pressure sensors after the flow view, and
+its buttons step through one sensor at a time (see lcd_ui.py).
+
 v0.3.0 (interposer board):
 - `pulse_edge` / `pulse_pull`: the board's 74LVC14 buffer inverts and drives
   the GPIO, so count RISING edges with no internal pull.
@@ -200,6 +203,7 @@ def main():
 
     lock = threading.Lock()
     latest_lock = threading.Lock()
+    latest_psi = {}  # pressure sensor name -> psi or None, for the LCD
 
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
@@ -354,6 +358,7 @@ def main():
                     pid = slug(ps["name"])
                     v = ads1.volts(int(ps["channel"]))
                     psi = pressure_psi(v, v5a, float(ps.get("full_scale_psi", 100)))
+                    latest_psi[ps["name"]] = psi
                     put(f"pressure_{pid}_volts", v / DIVIDER, 3)
                     put(f"pressure_{pid}", psi, 1)
                     msg.append(f"{ps['name']}={v / DIVIDER:.3f} V -> "
@@ -376,6 +381,9 @@ def main():
             lcd_ui = LcdUi(
                 sensor_names=[s["name"] for s in sensors],
                 get_reading=get_reading,
+                pressure_names=[ps["name"] for ps in pressure_sensors],
+                get_pressure=latest_psi.get,
+                get_total=lambda name: totals_l[name] * 0.264172,
                 color=opts.get("lcd_color", "red"),
                 refresh_s=float(opts.get("lcd_refresh_s", 0.5)),
                 poll_s=float(opts.get("button_poll_s", 0.05)),
